@@ -3,14 +3,14 @@
 # Description
 This project aims to provide a playground for the [Panaxeo Coding Arena](https://www.panaxeo.com/coding-arena) competition.
 
-The project is written in C# and .NET Core 8.0. It is a console application that can be run on Windows, Linux, and macOS. Acctualy there are two projects. One with the UI and one without. The one without the UI is faster. The UI is just for fun, and nice visualisation. It is not optimized for performance, od code quality.
+The project is written in C# and .NET Core 8.0. It is a console application that can be run on Windows, Linux, and macOS. Actually there are two projects. One with the UI and one without. The one without the UI is faster. The UI is just for fun, and nice visualisation. It is not optimized for performance, or code quality.
 
 ![The one with the UI](./assets/ui_animation.gif)
 
 ## Competition
 The description of the competition can be found in [GAME_ASSIGNMENT.md](GAME_ASSIGNMENT.md) or at [Panaxeo Coding Arena](https://www.panaxeo.com/coding-arena) website.
 
-**🛑 DISCLAIMER: It you run the `battleships.app` project, the one with the UI. Keep in mind that the UI and to game processing run in the same thread. So rendering the UI is slowing the processing/playing the game. If you want faster execution feel free to use the `battleships.app.simple` project. There is nothing more than just a POCO (Plain old console :-)).**
+**🛑 DISCLAIMER: If you run the `battleships.app` project, the one with the UI. Keep in mind that the UI and the game processing run in the same thread. So rendering the UI is slowing the processing/playing the game. If you want faster execution feel free to use the `battleships.app.simple` project. It is nothing more than just a POCO (Plain old console :-)).**
 
 ## How to run
 
@@ -42,7 +42,7 @@ The are 3 main objects in the solution:
 Represents the target you are shooting at.
 
 There are 3 game targets implemented:
-- `ConcreteLocalGameTarget` - this is the target that is initialized with one predefine map.
+- `ConcreteLocalGameTarget` - this is the target that is initialized with one predefined map.
 - `GeneratedLocalGameTarget` - a local game target which generates random maps with ships. The maps are generated with the `ShipPlacementGenerator` class. 
 - `PanaxeoApiGameTarget` - this game target is using the Panaxeo API. If you want to use it you need obtain a `token`. You can find more information about the API [here](https://www.panaxeo.com/coding-arena).
 
@@ -72,12 +72,12 @@ There are 3 game targets implemented:
 Each ship is defined with a number. Each type of ship has it's own number. `AvengersHelicarrier = 9, Carrier = 6, Battleship = 5, Destroyer = 4, Submarine = 3, Boat = 2` It is just a small help for `LocalGameTargets`.
 
 ### Match playing strategies - `IMatchPlayingStrategy`
-- represents the strategy of playing the game. It is responsible for generating the next shot. As input it receives the current state of the game. AnIt returns the next shot. 
+- represents the strategy of playing the game. It is responsible for generating the next shot. As input it receives the current state of the game. And returns the next shot. 
 
 There are 3 strategies implemented:
 - `DummyMatchPlayingStrategy` - in this strategy, we just go through the grid from left to right, top to bottom.
 
-- `SimpleMatchPlayingStrategy` - In this strategy we are using a simple approach to find the next target cell. We have two modes: *Searching* and *Targeting*. In searching mode we are not scanning cells one by one, but *randomly picking one of the untouched cells using parity fields (like on the chess board)*. If we hit a ship, we are switching to targeting mode. In targeting mode we are using the last hit cell as a starting point and try to find the next cell by checking the surrounding cells. If we hit a ship, we are adding the surrounding cells to a queue and try to hit them one by one.
+- `SimpleMatchPlayingStrategy` - In this strategy we are using a simple approach to find the next cell. We have two modes: *Searching* and *Targeting*. In searching mode we are not scanning cells one by one, but *randomly picking one of the untouched cells using parity fields (like on the chess board)*. If we hit a ship, we are switching to targeting mode. In targeting mode we are using the last hit cell as a starting point and try to find the next cell by checking the surrounding cells. If we hit a ship, we are adding the surrounding cells to a queue and try to hit them one by one.
 
 - `ProbabilityMatchPlayingStrategy` - In this strategy we are using a probability grid to find the next target cell. We have two modes: *Searching* and *Targeting*. After each shot we are updating the *probability grid*. In searching mode we pick the cell with the highest probability. In targeting mode we are using the last hit cell as a starting point and try to find the next cell by checking the surrounding cells. If we hit a ship, we are adding the surrounding cells to a queue and try to hit them one by one.
 
@@ -97,6 +97,7 @@ To implement your own strategy you need to implement the `IMatchPlayingStrategy`
   /// <returns>The next target to shoot at.</returns>
   MatchNextTargetCell GetNextTarget(MatchState matchState);
 ```
+
 ### Game - `Game`
 Represents the game. It is responsible for playing the game based on configuration. (Size of the grid, game target, match playing strategy, num of matches, etc.)
 
