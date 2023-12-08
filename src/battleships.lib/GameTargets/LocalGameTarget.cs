@@ -447,7 +447,8 @@ public abstract class LocalGameTarget : IGameTarget
                 return avengerResults;
             }
 
-            var targetedShipId = targetedCell.ShipWeight; // Ship ID is the ship weight (unique for each ship)
+            // need to multiply by -1 because the ship weight is negative (already hit). but we need the the parts of the ship which are not hit
+            var targetedShipId = targetedCell.ShipWeight * -1; // Ship ID is the ship weight (unique for each ship)
 
             var liveShipCells = state.GameFieldDefinition.Cells
                 .Select((cellValue, index) => new { CellValue = cellValue, Index = index })

@@ -77,7 +77,6 @@ public class MatchState
     /// </summary>
     public bool AvengerUsed { get; set; }
 
-
     /// <summary>
     /// Maps state from initial state.
     /// </summary>

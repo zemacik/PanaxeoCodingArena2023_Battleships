@@ -1,6 +1,7 @@
 ﻿using battleships.lib.GameTargets;
 using battleships.lib.MatchPlayingStrategies;
 using battleships.lib.Models;
+
 using Microsoft.Extensions.Logging;
 
 namespace battleships.lib;
@@ -115,6 +116,7 @@ public class Game
         var matchResults = new List<MatchResult>();
         var isFirstIteration = true;
         var newMapId = matchState.MapId;
+        var totalMoves = matchState.MoveCount;
 
         while (matchesPlayed < totalMatchesToPlay)
         {
@@ -123,9 +125,9 @@ public class Game
                 _matchPlayingStrategyFactory.Create(),
                 _loggerFactory,
                 _isSimulation,
-                _onMatchStarted,
-                _onMatchAfterFire,
-                _onMatchFinished
+                (args) => _onMatchStarted?.Invoke(args with { TotalMoveCount = totalMoves + args.MatchMoveCount }),
+                (args) => _onMatchAfterFire?.Invoke(args with { TotalMoveCount = totalMoves + args.MatchMoveCount }),
+                (args) => _onMatchFinished?.Invoke(args with { TotalMoveCount = totalMoves + args.MatchMoveCount })
             );
 
             var matchInitialState = new MatchInitialState
@@ -157,6 +159,7 @@ public class Game
             newMapId = matchResult.MapId;
             matchesPlayed++;
             isFirstIteration = false;
+            totalMoves += matchResult.MoveCount;
         }
 
         _logger.LogInformation("Game finished with total move count: {totalMoveCount}",

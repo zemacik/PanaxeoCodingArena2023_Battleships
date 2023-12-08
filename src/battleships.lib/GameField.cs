@@ -242,4 +242,42 @@ public class GameField<T>
                 yield return adjacentPosition;
         }
     }
+
+    /// <summary>
+    /// Gets all adjacent cell positions around the given position. (top bottom only)
+    /// </summary>
+    /// <param name="position">The position to get the adjacent cell positions for.</param>
+    /// <returns>All adjacent cell positions around the given position.</returns>
+    public IEnumerable<GameCellPosition> GetTopBottomAdjacentCellPositions(GameCellPosition position)
+    {
+        var surroundingOffsets = new List<(int, int)> { (-1, 0), (1, 0) };
+
+        foreach (var offset in surroundingOffsets)
+        {
+            var adjacentPosition =
+                new GameCellPosition(position.Row + offset.Item1, position.Column + offset.Item2);
+
+            if (IsCellPositionInsideField(adjacentPosition))
+                yield return adjacentPosition;
+        }
+    }
+
+    /// <summary>
+    /// Gets all adjacent cell positions around the given position. (left right only)
+    /// </summary>
+    /// <param name="position">The position to get the adjacent cell positions for.</param>
+    /// <returns>All adjacent cell positions around the given position.</returns>
+    public IEnumerable<GameCellPosition> GetLeftRightAdjacentCellPositions(GameCellPosition position)
+    {
+        var surroundingOffsets = new List<(int, int)> { (0, -1), (0, -1) };
+
+        foreach (var offset in surroundingOffsets)
+        {
+            var adjacentPosition =
+                new GameCellPosition(position.Row + offset.Item1, position.Column + offset.Item2);
+
+            if (IsCellPositionInsideField(adjacentPosition))
+                yield return adjacentPosition;
+        }
+    }
 }

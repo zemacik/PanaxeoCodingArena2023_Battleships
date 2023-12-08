@@ -1,5 +1,6 @@
 using battleships.lib.MatchPlayingStrategies.Models;
 using battleships.lib.Models;
+
 using Microsoft.Extensions.Logging;
 
 namespace battleships.lib.MatchPlayingStrategies;
@@ -14,16 +15,6 @@ namespace battleships.lib.MatchPlayingStrategies;
 public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchPlayingStrategy
 {
     /// <summary>
-    /// Callback for when the probability grid is updated.
-    /// </summary>
-    private Action<ProbabilitiesUpdatedArgs>? OnProbabilityGridUpdated { get; }
-
-    /// <summary>
-    /// The logger.
-    /// </summary>
-    private readonly ILogger _logger;
-
-    /// <summary>
     /// The current play mode.
     /// </summary>
     private enum PlayMode
@@ -32,20 +23,35 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
         Targeting,
     }
 
-    // remaining ship sizes 
-    private readonly List<int> _remainingShipSizes = new() { 2, 3, 3, 4, 5, 9 };
+    /// <summary>
+    /// Callback for when the probability grid is updated.
+    /// </summary>
+    private Action<ProbabilitiesUpdatedArgs>? OnProbabilityGridUpdated { get; }
+
+    /// <summary>
+    /// The logger.
+    /// </summary>
+    protected ILogger Logger { get; init; }
+
+    // the list of hit positions in the current targeting session
+    protected readonly HashSet<GameCellPosition> TargetingSessionHitPositions = new();
 
     // the last target position
-    private MatchNextTargetCell? _lastTarget;
+    protected MatchNextTargetCell? LastTarget;
+
+    // remaining ship sizes 
+    protected readonly List<int> RemainingShipSizes = new() { 2, 3, 3, 4, 5, 9 };
+
+    // the queue of possible targets.
+    protected readonly Queue<GameCellPosition> PossibleTargets = new();
+
+    // the current match state
+    protected MatchState MatchState;
 
     // the current play mode
     private PlayMode _playMode = PlayMode.Searching;
 
-    // the queue of possible targets.
-    private readonly Queue<GameCellPosition> _possibleTargets = new();
-
-    // the list of hit positions in the current targeting session
-    private readonly HashSet<GameCellPosition> _targetingSessionHitPositions = new();
+    private GameCellPosition? _ironmansRevealedPosition;
 
     // the list of sunk ship positions
     private readonly HashSet<GameCellPosition> _sunkShipPositions = new();
@@ -62,25 +68,32 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
         ILoggerFactory loggerFactory,
         Action<ProbabilitiesUpdatedArgs>? onProbabilityGridUpdated = null)
     {
-        _logger = loggerFactory.CreateLogger<ProbabilityMatchPlayingStrategy>();
+        Logger = loggerFactory.CreateLogger<ProbabilityMatchPlayingStrategy>();
         _probabilitiesGrid = new GameField<int>(Constants.GridRows, Constants.GridColumns);
         OnProbabilityGridUpdated = onProbabilityGridUpdated;
     }
 
     /// <inheritdoc />
-    public string Name => "Probability Match Playing Strategy";
+    public virtual string Name => "Probability Match Playing Strategy";
 
     /// <inheritdoc />
     public MatchNextTargetCell GetNextTarget(MatchState matchState)
     {
-        HandlePreviousShootingResult(matchState);
-        AssertMatchNotFinished(matchState);
-        
-        UpdateProbabilityGrid(matchState);
-
-        if (ShouldSwitchToTargeting(matchState))
+        if (matchState is null)
         {
-            SwitchToTargetingMode(matchState);
+            throw new ArgumentNullException(nameof(matchState));
+        }
+
+        MatchState = matchState;
+
+        HandlePreviousShootingResult();
+        AssertMatchNotFinished();
+
+        UpdateProbabilityGrid();
+
+        if (ShouldSwitchToTargeting())
+        {
+            SwitchToTargetingMode();
         }
         else if (ShouldSwitchToSearching())
         {
@@ -88,10 +101,10 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
         }
 
         var nextTarget = _playMode == PlayMode.Targeting
-            ? GetNextCellByTargeting(matchState)
-            : GetNextCellBySearching(matchState);
+            ? GetNextCellByTargeting()
+            : GetNextCellBySearching();
 
-        _lastTarget = nextTarget;
+        LastTarget = nextTarget;
 
         return nextTarget;
     }
@@ -100,102 +113,113 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// Handles the result of the previous shot. Updates the targeting session hit positions and the
     /// sunk ship positions. Also updates the game field with revealed cells.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    private void HandlePreviousShootingResult(MatchState matchState)
+    protected void HandlePreviousShootingResult()
     {
-        if (_lastTarget != null && matchState.LastMoveWasHit)
+        if (LastTarget != null && MatchState.LastMoveWasHit)
         {
-            _targetingSessionHitPositions.Add(_lastTarget.Position);
+            TargetingSessionHitPositions.Add(LastTarget.Position);
         }
 
         // Handle the result of the last shot by Avenger
         if (FiredWithAvenger())
         {
-            UpdateAfterAvengerShot(matchState);
+            UpdateAfterAvengerShot();
         }
 
+        // Process unmarked ships to sunk, or targetting session
+        ProccessHitIslands();
+    }
+
+    private void ProccessHitIslands()
+    {
         // we have some floating hits, can occur after Avenger's power
-        if (_targetingSessionHitPositions.Count == 0)
+        if (TargetingSessionHitPositions.Count == 0)
         {
-            var firstLonelyHit = GetLonelyHits(matchState).FirstOrDefault();
+            var firstLonelyHit = GetLonelyHits().FirstOrDefault();
             if (firstLonelyHit != null)
             {
-                _targetingSessionHitPositions.Add(firstLonelyHit);
+                TargetingSessionHitPositions.Add(firstLonelyHit);
             }
         }
 
         // we have ongoing session, but need to scan for adjacent hits not connected to the session, can occur after Avenger's power
-        if (_targetingSessionHitPositions.Count > 0)
+        if (TargetingSessionHitPositions.Count > 0)
         {
             void AddAdjacentHits(GameCellPosition position)
             {
-                var all2AdjacentHits = matchState.GameField.GetAllCrossAdjacentCellPositions(position)
-                    .Where(pos => matchState.GameField.GetCellStatus(pos) == CellState.Ship
-                                  && !_targetingSessionHitPositions.Contains(pos)).ToArray();
+                var all2AdjacentHits = MatchState.GameField.GetAllCrossAdjacentCellPositions(position)
+                    .Where(pos => MatchState.GameField.GetCellStatus(pos) == CellState.Ship
+                                  && !TargetingSessionHitPositions.Contains(pos)).ToArray();
 
                 foreach (var ah in all2AdjacentHits)
                 {
-                    _targetingSessionHitPositions.Add(ah);
+                    TargetingSessionHitPositions.Add(ah);
                     AddAdjacentHits(ah); // Recursive
                 }
             }
 
-            foreach (var ah in _targetingSessionHitPositions.ToArray())
+            foreach (var ah in TargetingSessionHitPositions.ToArray())
             {
                 AddAdjacentHits(ah);
             }
         }
 
         // detect if the ship was sunk
-        DetectAndProcessSunkenShip(matchState);
+        var shipWasSunk = DetectAndProcessSunkenShip();
+
+        if (shipWasSunk)
+        {
+            ProccessHitIslands();
+        }
     }
 
     /// <summary>
     /// Checks if the last shot was fired with an Avenger power. 
     /// </summary>
-    private bool FiredWithAvenger() => _lastTarget is { FireWithAvenger: true };
+    protected bool FiredWithAvenger() => LastTarget is { FireWithAvenger: true };
 
     /// <summary>
     /// Updates the game fields with the revealed cells after an Avenger shot.
     /// </summary>
     /// <param name="matchState"></param>
-    private void UpdateAfterAvengerShot(MatchState matchState)
+    protected void UpdateAfterAvengerShot()
     {
-        if (_lastTarget == null)
+        if (LastTarget == null)
             throw new InvalidOperationException("Last target should not be null.");
 
-        _logger.LogTrace("Updating after Avenger shot.");
+        Logger.LogTrace("Updating after Avenger shot.");
 
         // Ironman's ability is to reveal the smallest remaining ship
-        if (_lastTarget.Avenger == Avenger.Ironman)
+        if (LastTarget.Avenger == Avenger.Ironman)
         {
-            foreach (var avengerFireResponse in matchState.AvengerFireResult)
+            foreach (var avengerFireResponse in MatchState.AvengerFireResult)
             {
                 var suggestedPosition =
                     new GameCellPosition(avengerFireResponse.Key.Row, avengerFireResponse.Key.Column);
 
-                _possibleTargets.Enqueue(suggestedPosition);
+                _ironmansRevealedPosition = suggestedPosition;
+                //PossibleTargets.Enqueue(suggestedPosition);
             }
         }
 
         // Hulk's ability is to destroy the whole ship if you fire on a part of it
-        else if (_lastTarget.Avenger == Avenger.Hulk)
+        else if (LastTarget.Avenger == Avenger.Hulk)
         {
-            if (!matchState.LastMoveWasHit)
+            if (!MatchState.LastMoveWasHit)
                 return;
 
-            foreach (var avengerFireResponse in matchState.AvengerFireResult)
+            foreach (var avengerFireResponse in MatchState.AvengerFireResult)
             {
                 var suggestedPosition =
                     new GameCellPosition(avengerFireResponse.Key.Row, avengerFireResponse.Key.Column);
 
-                _targetingSessionHitPositions.Add(suggestedPosition);
+                TargetingSessionHitPositions.Add(suggestedPosition);
             }
         }
 
         // Thor's ability is to reveal 11 spaces at once with his lightning.
         // The one you’re firing at + 10 random spaces. All in a single turn.
-        else if (_lastTarget.Avenger == Avenger.Thor)
+        else if (LastTarget.Avenger == Avenger.Thor)
         {
             // The game field is already updated with the revealed cells
         }
@@ -204,10 +228,9 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Asserts that the match is not finished.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    private void AssertMatchNotFinished(MatchState matchState)
+    protected void AssertMatchNotFinished()
     {
-        if (matchState.MatchFinished)
+        if (MatchState.MatchFinished)
         {
             throw new InvalidOperationException("Match is already finished.");
         }
@@ -217,63 +240,65 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// Checks if the play mode should be switched to searching mode.
     /// </summary>
     /// <returns>True if the play mode should be switched to searching mode, false otherwise.</returns>
-    private bool ShouldSwitchToSearching()
+    protected bool ShouldSwitchToSearching()
     {
         if (_playMode == PlayMode.Searching)
             return false;
 
         // The targeting session is over
-        return _targetingSessionHitPositions.Count == 0;
+        return TargetingSessionHitPositions.Count == 0;
     }
 
     /// <summary>
     /// Searches for a ship in the targeting session and removes it from the list of remaining ships.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    private void DetectAndProcessSunkenShip(MatchState matchState)
+    protected virtual bool DetectAndProcessSunkenShip()
     {
-        if (_targetingSessionHitPositions.Count > 1)
+        if (TargetingSessionHitPositions.Count > 1)
         {
-            var allAdjacentKnown = _targetingSessionHitPositions.All(pos =>
-                AreAllAdjacentCellsKnown(pos, matchState));
+            var allAdjacentKnown = TargetingSessionHitPositions.All(pos =>
+                AreAllAdjacentCellsKnown(pos));
 
             // is we get information that avenger is available, we can assume that the ship is sunk
             const int theAvengersHelicarrierCells = 9;
-            var isAvengersHelicarrierSunk = matchState.AvengerAvailable &&
-                                            _targetingSessionHitPositions.Count == theAvengersHelicarrierCells;
+            var isAvengersHelicarrierSunk = MatchState.AvengerAvailable &&
+                                            TargetingSessionHitPositions.Count == theAvengersHelicarrierCells;
 
             const int theCarrierCells = 5;
-            var isCarrierSunk = GetNextTargetInLine(matchState) == null
-                                && _targetingSessionHitPositions.Count == theCarrierCells
-                                && !_remainingShipSizes.Contains(theAvengersHelicarrierCells);
+            var isCarrierSunk = GetNextTargetInLine() == null
+                                && TargetingSessionHitPositions.Count == theCarrierCells
+                                && !RemainingShipSizes.Contains(theAvengersHelicarrierCells);
 
             if (isAvengersHelicarrierSunk ||
                 isCarrierSunk ||
                 allAdjacentKnown)
             {
                 RemoveSunkShipFromList();
-                MarkAllAroundAdjacentCellsAsWater(matchState);
+                MarkAllAroundAdjacentCellsAsWater();
                 StoreSunkShipPositions();
 
-                _targetingSessionHitPositions.Clear(); // Clear the targeting session as you might have sunk the ship
+                TargetingSessionHitPositions.Clear(); // Clear the targeting session as you might have sunk the ship
+                return true;
             }
         }
+
+        return false;
     }
 
     /// <summary>
     /// Removes the sunk ship from the list of remaining ships.
     /// </summary>
-    private void RemoveSunkShipFromList()
+    protected void RemoveSunkShipFromList()
     {
-        _remainingShipSizes.Remove(_targetingSessionHitPositions.Count);
+        RemainingShipSizes.Remove(TargetingSessionHitPositions.Count);
     }
 
     /// <summary>
     /// Saves the positions of the sunk ship.
     /// </summary>
-    private void StoreSunkShipPositions()
+    protected void StoreSunkShipPositions()
     {
-        foreach (var pos in _targetingSessionHitPositions)
+        foreach (var pos in TargetingSessionHitPositions)
         {
             _sunkShipPositions.Add(pos);
         }
@@ -282,44 +307,41 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Marks all surrounding cells of the sunk ship as water.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    private void MarkAllAroundAdjacentCellsAsWater(MatchState matchState)
+    protected void MarkAllAroundAdjacentCellsAsWater()
     {
-        foreach (var pos in _targetingSessionHitPositions)
-        foreach (var apos in matchState.GameField.GetAllAroundAdjacentCellPositions(pos))
-        {
-            var cs = matchState.GameField.GetCellStatus(apos);
-            if (cs == CellState.Unknown)
+        foreach (var pos in TargetingSessionHitPositions)
+            foreach (var apos in MatchState.GameField.GetAllAroundAdjacentCellPositions(pos))
             {
-                matchState.GameField.SetCellStatus(apos, CellState.Water);
+                var cs = MatchState.GameField.GetCellStatus(apos);
+                if (cs == CellState.Unknown)
+                {
+                    MatchState.GameField.SetCellStatus(apos, CellState.Water);
+                }
             }
-        }
     }
 
     /// <summary>
     /// Checks if the play mode should be switched to targeting mode.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>True if the play mode should be switched to targeting mode, false otherwise.</returns>
-    private bool ShouldSwitchToTargeting(MatchState matchState)
+    protected bool ShouldSwitchToTargeting()
     {
         // Switch to targeting mode if the last move was a hit and not already in targeting mode
         return _playMode != PlayMode.Targeting
-               && (matchState.LastMoveWasHit
-                   || _targetingSessionHitPositions.Count > 0
-                   || (_targetingSessionHitPositions.Count == 0 && ExistsLonelyHit(matchState)));
+               && (MatchState.LastMoveWasHit
+                   || TargetingSessionHitPositions.Count > 0
+                   || (TargetingSessionHitPositions.Count == 0 && ExistsLonelyHit()));
     }
 
     /// <summary>
     /// Switches the play mode to searching mode.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    private void SwitchToTargetingMode(MatchState matchState)
+    protected void SwitchToTargetingMode()
     {
-        if (!ShouldSwitchToTargeting(matchState))
+        if (!ShouldSwitchToTargeting())
             throw new Exception("Targeting mode not applicable.");
 
-        _logger.LogTrace("Switching to targeting mode.");
+        Logger.LogTrace("Switching to targeting mode.");
 
         _playMode = PlayMode.Targeting;
     }
@@ -327,9 +349,9 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Switches the play mode to searching mode.
     /// </summary>
-    private void SwitchToSearchingMode()
+    protected void SwitchToSearchingMode()
     {
-        _logger.LogTrace("Switching to searching mode.");
+        Logger.LogTrace("Switching to searching mode.");
 
         _playMode = PlayMode.Searching;
     }
@@ -337,22 +359,35 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Check if all adjacent cells to the given position are known (not unknown)
     /// </summary>
-    private bool AreAllAdjacentCellsKnown(GameCellPosition position, MatchState matchState) =>
-        matchState.GameField.GetAllCrossAdjacentCellPositions(position)
-            .All(pos => matchState.GameField.GetCellStatus(pos) != CellState.Unknown);
+    protected bool AreAllAdjacentCellsKnown(GameCellPosition position) =>
+        MatchState.GameField.GetAllCrossAdjacentCellPositions(position)
+            .All(pos => MatchState.GameField.GetCellStatus(pos) != CellState.Unknown);
 
     /// <summary>
     /// Gets the next target cell by searching => meaning the cell with the highest probability.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>The next target cell.</returns>
-    private MatchNextTargetCell GetNextCellBySearching(MatchState matchState)
+    protected MatchNextTargetCell GetNextCellBySearching()
     {
+        var suggestedPosition = GetNextCellFromPossibleTargets();
+        if (suggestedPosition != null)
+        {
+            return suggestedPosition;
+        }
+
+        if(_ironmansRevealedPosition != null)
+        {
+            var nextTarget = new MatchNextTargetCell(_ironmansRevealedPosition);
+            _ironmansRevealedPosition = null;
+
+            return nextTarget;
+        }
+
         // Find the cell with the highest probability
         var suggestedCell = FindHighestProbabilityCell();
 
         // Decide whether to use an Avenger power
-        var (useAvenger, avenger) = ShouldUseAvengerPower(matchState, suggestedCell);
+        var (useAvenger, avenger) = ShouldUseAvengerPower();
 
         return new MatchNextTargetCell(suggestedCell)
         {
@@ -364,37 +399,39 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Gets the next target cell by targeting in the current targeting session.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>The next target cell.</returns>
-    private MatchNextTargetCell GetNextCellByTargeting(MatchState matchState)
+    protected virtual MatchNextTargetCell GetNextCellByTargeting()
     {
         // If the direction of the ship is known, continue along that direction
-        if (_targetingSessionHitPositions.Count > 1)
+        if (TargetingSessionHitPositions.Count > 1)
         {
-            var nextTarget = GetNextTargetInLine(matchState);
+            var nextTarget = GetNextTargetInLine();
             if (nextTarget != null)
             {
                 return new MatchNextTargetCell(nextTarget);
             }
         }
 
+        // Decide whether to use an Avenger power
+        var (useAvenger, avenger) = ShouldUseAvengerPower();
+
         // If the direction is not known, check adjacent cells
-        var adjacentTargets = GetUnknownAdjacentTargets(matchState, _targetingSessionHitPositions.Last());
+        var adjacentTargets = GetUnknownAdjacentTargets(TargetingSessionHitPositions.Last());
         foreach (var target in adjacentTargets)
         {
-            return new MatchNextTargetCell(target);
+            return new MatchNextTargetCell(target) with { FireWithAvenger = useAvenger, Avenger = avenger };
         }
 
         // get adjacent targets from targetingSessionHitPositions
-        foreach (var hitPosition in _targetingSessionHitPositions)
+        foreach (var hitPosition in TargetingSessionHitPositions)
         {
-            if (_lastTarget!.Position == hitPosition)
+            if (LastTarget!.Position == hitPosition)
                 continue;
 
-            var adjacentTargetsFromHitPosition = GetUnknownAdjacentTargets(matchState, hitPosition);
+            var adjacentTargetsFromHitPosition = GetUnknownAdjacentTargets(hitPosition);
             foreach (var target in adjacentTargetsFromHitPosition)
             {
-                return new MatchNextTargetCell(target);
+                return new MatchNextTargetCell(target) with { FireWithAvenger = useAvenger, Avenger = avenger };
             }
         }
 
@@ -405,148 +442,137 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// Detects if the hits in the targeting session are in a line and returns the next target cell in that line.
     /// At the beginning or at the end of the line.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>The next target cell in the line.</returns>
-    private GameCellPosition? GetNextTargetInLine(MatchState matchState)
+    protected virtual GameCellPosition? GetNextTargetInLine()
     {
-        var lastHit = _targetingSessionHitPositions.Last();
-        var firstHit = _targetingSessionHitPositions.First(); // First hit in the current targeting session
-
-        // Determine ship's orientation based on the first two hits
-        var hitPositionsArray = _targetingSessionHitPositions.ToArray();
-        var isHorizontal = firstHit.Row == hitPositionsArray[1].Row;
-        var isVertical = firstHit.Column == hitPositionsArray[1].Column;
+        if (!AreHitsInLine())
+            return null;
 
         // Calculate potential next target cells based on the ship's orientation
+        GameCellPosition possibleWaterOneEndCell;
+        GameCellPosition possibleWaterSecondEndCell;
+
+        // Determine ship's orientation based on the first two hits
+        var isHorizontal = AreHitsInHorizontalLine();
         if (isHorizontal)
         {
             // Check cells to the left and right of the last hit
-            var orderedHitsHorizontally = _targetingSessionHitPositions.OrderBy(pos => pos.Column).ToArray();
+            var orderedHitsHorizontally = TargetingSessionHitPositions.OrderBy(pos => pos.Column).ToArray();
             var mostLeftHit = orderedHitsHorizontally.First();
             var mostRightHit = orderedHitsHorizontally.Last();
 
-            var leftCell = mostLeftHit with { Column = mostLeftHit.Column - 1 };
-            var rightCell = mostRightHit with { Column = mostRightHit.Column + 1 };
-
-            // If the last hit was water, target the opposite direction from the first hit
-            if (matchState.GameField.GetCellStatus(lastHit) == CellState.Water)
-            {
-                return GetOppositeDirectionTarget(matchState, firstHit, isHorizontal);
-            }
-
-            // Choose the next target cell in the line that is within the grid and not already known
-            return GetNextValidCell(matchState, leftCell, rightCell);
+            possibleWaterOneEndCell = mostLeftHit with { Column = mostLeftHit.Column - 1 };
+            possibleWaterSecondEndCell = mostRightHit with { Column = mostRightHit.Column + 1 };
         }
-
-        if (isVertical)
+        else
         {
             // Check cells above and below the last hit
-            var orderedHitsVertically = _targetingSessionHitPositions.OrderBy(pos => pos.Column).ToArray();
+            var orderedHitsVertically = TargetingSessionHitPositions.OrderBy(pos => pos.Row).ToArray();
             var mostUpperHit = orderedHitsVertically.First();
             var mostLowerHit = orderedHitsVertically.Last();
 
-            var upCell = mostUpperHit with { Row = mostUpperHit.Row - 1 };
-            var downCell = mostLowerHit with { Row = mostLowerHit.Row + 1 };
-
-            // If the last hit was water, target the opposite direction from the first hit
-            if (matchState.GameField.GetCellStatus(lastHit) == CellState.Water)
-            {
-                return GetOppositeDirectionTarget(matchState, firstHit, isHorizontal);
-            }
-
-            // Choose the next target cell in the line that is within the grid and not already known
-            return GetNextValidCell(matchState, upCell, downCell);
+            possibleWaterOneEndCell = mostUpperHit with { Row = mostUpperHit.Row - 1 };
+            possibleWaterSecondEndCell = mostLowerHit with { Row = mostLowerHit.Row + 1 };
         }
 
-        // If no valid next target cell is found
-        return null;
+        if (IsWithinGrid(possibleWaterOneEndCell) && IsCellUnknown(possibleWaterOneEndCell))
+        {
+            return possibleWaterOneEndCell;
+        }
+        
+        if (IsWithinGrid(possibleWaterSecondEndCell) && IsCellUnknown(possibleWaterSecondEndCell))
+        {
+            return possibleWaterSecondEndCell;
+        }
+
+        return null;        
     }
 
-    private GameCellPosition? GetOppositeDirectionTarget(MatchState matchState, GameCellPosition position,
-        bool isHorizontal)
+    /// <summary>
+    /// Checks if the hits in the targeting session are in a line.
+    /// </summary>
+    protected bool AreHitsInLine() => AreHitsInHorizontalLine() || AreHitsInVerticalLine();
+    
+    /// <summary>
+    /// Checks if the hits in the targeting session are in horizontal line.
+    /// </summary>
+    /// <returns>True if the hits are in horizontal line, false otherwise.</returns>    
+    protected bool AreHitsInHorizontalLine() => TargetingSessionHitPositions.Select(x => x.Row).Distinct().Count() == 1;
+    
+    /// <summary>
+    /// Checks if the hits in the targeting session are in vertical line.
+    /// </summary>
+    /// <returns>True if the hits are in vertical line, false otherwise.</returns>
+    protected bool AreHitsInVerticalLine() => TargetingSessionHitPositions.Select(x => x.Column).Distinct().Count() == 1;
+    
+    /// <summary>
+    /// Gets ordered target positions in line
+    /// </summary>
+    /// <returns>Ordered target positions in line</returns>
+    protected IEnumerable<GameCellPosition> GetOrderedTargetingSessionHitPositionsInLine()
     {
-        var oppositeCell = isHorizontal
-            ? position with { Column = position.Column - 1 }
-            : position with { Row = position.Row - 1 };
-
-        if (IsWithinGrid(matchState, oppositeCell) && IsCellUnknown(matchState, oppositeCell))
+        if (AreHitsInHorizontalLine())
         {
-            return oppositeCell;
+            return TargetingSessionHitPositions.OrderBy(x => x.Column);
         }
 
-        return null;
-    }
-
-    private GameCellPosition? GetNextValidCell(MatchState matchState, GameCellPosition cell1, GameCellPosition cell2)
-    {
-        if (IsWithinGrid(matchState, cell1) && IsCellUnknown(matchState, cell1))
+        if (AreHitsInVerticalLine())
         {
-            return cell1;
+            return TargetingSessionHitPositions.OrderBy(x => x.Row);
         }
 
-        if (IsWithinGrid(matchState, cell2) && IsCellUnknown(matchState, cell2))
-        {
-            return cell2;
-        }
-
-        return null;
+        return TargetingSessionHitPositions;
     }
 
     /// <summary>
     /// Checks if the given cell is within the grid.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <param name="cell">The cell to check.</param>
     /// <returns>True if the cell is within the grid, false otherwise.</returns>
-    private bool IsWithinGrid(MatchState matchState, GameCellPosition cell) =>
-        matchState.GameField.IsCellPositionInsideField(cell);
-    //cell.Row >= 0 && cell.Row < matchState.Rows && cell.Column >= 0 && cell.Column < matchState.Columns;
+    protected bool IsWithinGrid(GameCellPosition cell) =>
+        MatchState.GameField.IsCellPositionInsideField(cell);
 
     /// <summary>
     /// Checks if the given cell is unknown.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <param name="cell">The cell to check.</param>
     /// <returns>True if the cell is unknown, false otherwise.</returns>
-    private bool IsCellUnknown(MatchState matchState, GameCellPosition cell) =>
-        matchState.GameField.GetCellStatus(cell) == CellState.Unknown;
+    protected bool IsCellUnknown(GameCellPosition cell) =>
+        MatchState.GameField.GetCellStatus(cell) == CellState.Unknown;
 
     /// <summary>
     /// Gets all the unknown adjacent targets of the given position.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <param name="position">The position to check.</param>
     /// <returns>The unknown adjacent targets.</returns>
-    private IEnumerable<GameCellPosition> GetUnknownAdjacentTargets(MatchState matchState, GameCellPosition position) =>
-        matchState.GameField.GetAllCrossAdjacentCellPositions(position).Where(pos => IsCellUnknown(matchState, pos));
+    protected IEnumerable<GameCellPosition> GetUnknownAdjacentTargets(GameCellPosition position) =>
+        MatchState.GameField.GetAllCrossAdjacentCellPositions(position).Where(IsCellUnknown);
 
     /// <summary>
     /// Checks if there is a lonely hit on the game field. Meaning a hit that is not connected to any other hit.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>True if there is a lonely hit, false otherwise.</returns>
-    private bool ExistsLonelyHit(MatchState matchState)
+    protected bool ExistsLonelyHit()
     {
-        return GetLonelyHits(matchState).Any();
+        return GetLonelyHits().Any();
     }
 
     /// <summary>
     /// Gets the lonely hits on the game field. Meaning hits that are not connected to any other hit.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>The lonely hits positions.</returns>
-    private IEnumerable<GameCellPosition> GetLonelyHits(MatchState matchState)
+    protected IEnumerable<GameCellPosition> GetLonelyHits()
     {
-        var lonelyShip = matchState.GameField.Cells
+        var lonelyShip = MatchState.GameField.Cells
             .Select((cellValue, index) => new
             {
                 cellValue,
-                position = matchState.GameField.GetCellPosition(index)
+                position = MatchState.GameField.GetCellPosition(index)
             })
             .Where(x =>
                 x.cellValue == CellState.Ship
                 && !_sunkShipPositions.Contains(x.position)
-                && !_targetingSessionHitPositions.Contains(x.position))
+                && !TargetingSessionHitPositions.Contains(x.position))
             .Select(x => x.position);
 
         return lonelyShip;
@@ -555,31 +581,29 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Determines whether we should use an Avenger power and which one.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    /// <param name="targetCell">The target cell.</param>
     /// <returns>True if the we should use an Avenger power and which one, false otherwise.</returns>
-    private (bool, Avenger) ShouldUseAvengerPower(MatchState matchState, GameCellPosition targetCell)
+    protected (bool, Avenger) ShouldUseAvengerPower()
     {
         // Check if the Avenger power is available and can be used
-        if (!matchState.AvengerAvailable || matchState.AvengerUsed)
+        if (!MatchState.AvengerAvailable || MatchState.AvengerUsed)
         {
             return (false, Avenger.Undefined);
         }
 
+        if (_playMode == PlayMode.Searching && ShouldUseIronManPower())
+        {
+            return (true, Avenger.Ironman);
+        }
+
         // Decision logic for each Avenger's power
-        if (ShouldUseThorPower(matchState))
+        if (_playMode == PlayMode.Searching && ShouldUseThorPower())
         {
             return (true, Avenger.Thor);
         }
 
-        if (_playMode == PlayMode.Targeting && ShouldUseHulkPower(matchState, targetCell))
+        if (_playMode == PlayMode.Targeting && ShouldUseHulkPower())
         {
             return (true, Avenger.Hulk);
-        }
-
-        if (ShouldUseIronManPower(matchState))
-        {
-            return (true, Avenger.Ironman);
         }
 
         return (false, Avenger.Undefined);
@@ -589,12 +613,11 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// Checks whether we should use the thor's power. I use Thor when there are many unexplored cells.
     /// To be exact when the count of unknown cells is more then half of game field. 
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>True if the we should use thor's power, false otherwise.</returns>
-    private bool ShouldUseThorPower(MatchState matchState)
+    protected bool ShouldUseThorPower()
     {
-        var unknownCells = matchState.GameField.Cells.Count(cell => cell == CellState.Unknown);
-        return unknownCells > (matchState.Rows * matchState.Columns) / 2;
+        var unknownCells = MatchState.GameField.Cells.Count(cell => cell == CellState.Unknown);
+        return unknownCells > (MatchState.Rows * MatchState.Columns) / 2;
     }
 
     /// <summary>
@@ -602,12 +625,14 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// Use Hulk's power to sink a ship when a part of it is already hit. It is ideal in targeting mode when
     /// we've sure you've hit a ship.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <param name="targetCell">The target cell.</param>
     /// <returns>True if the we should use hulk's power, false otherwise.</returns>
-    private bool ShouldUseHulkPower(MatchState matchState, GameCellPosition targetCell)
+    protected bool ShouldUseHulkPower()
     {
-        return matchState.GameField.GetCellStatus(targetCell) == CellState.Ship;
+        return TargetingSessionHitPositions.Count == 1
+            && !RemainingShipSizes.Contains(2)
+            && !RemainingShipSizes.Contains(3)
+            && (RemainingShipSizes.Contains(4) || RemainingShipSizes.Contains(5));
     }
 
     /// <summary>
@@ -615,23 +640,38 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// We should use it when the remaining ships are small 2 or 3 cells and the count of
     /// unknown cells is more then one quarter of game field. 
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>True if the we should use ironman's power, false otherwise.</returns>
-    private bool ShouldUseIronManPower(MatchState matchState)
+    protected bool ShouldUseIronManPower()
     {
         // Use Iron Man when remaining ships are small and hard to find
         // This can be determined by the sizes of remaining ships and the state of the game field.
 
-        return _remainingShipSizes.All(size => size <= 3) &&
-               matchState.GameField.Cells.Count(cell => cell == CellState.Unknown) >
-               (matchState.Rows * matchState.Columns) / 4;
+        return RemainingShipSizes.All(size => size <= 3) &&
+               MatchState.GameField.Cells.Count(cell => cell == CellState.Unknown) >
+               (MatchState.Rows * MatchState.Columns) / 4;
+    }
+
+    /// <summary>
+    /// Gets the next cell from the queue of possible targets.
+    /// </summary>
+    /// <returns>The next cell from the queue of possible targets.</returns>
+    protected MatchNextTargetCell? GetNextCellFromPossibleTargets()
+    {
+        if (PossibleTargets.Count <= 0) 
+            return null;
+        
+        var suggestedPosition = PossibleTargets.Dequeue();
+
+        return MatchState.GameField.GetCellStatus(suggestedPosition) == CellState.Unknown 
+            ? new MatchNextTargetCell(suggestedPosition) 
+            : GetNextCellFromPossibleTargets();
     }
 
     /// <summary>
     /// Searches for the cell with the highest probability.
     /// </summary>
     /// <returns>The cell with the highest probability.</returns>
-    private GameCellPosition FindHighestProbabilityCell()
+    protected GameCellPosition FindHighestProbabilityCell()
     {
         // get cells with highest probability
         var z = _probabilitiesGrid.Cells.Select((cellValue, index) => new { cellValue, index })
@@ -651,13 +691,12 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// <summary>
     /// Updates the probability grid.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
-    private void UpdateProbabilityGrid(MatchState matchState)
+    protected void UpdateProbabilityGrid()
     {
         // Reset the probability grid
-        _probabilitiesGrid.Initialize(new int[matchState.Rows * matchState.Columns]);
+        _probabilitiesGrid.Initialize(new int[MatchState.Rows * MatchState.Columns]);
 
-        foreach (var shipSize in _remainingShipSizes)
+        foreach (var shipSize in RemainingShipSizes)
         {
             // simplified solution for now
             var ship = shipSize switch
@@ -670,10 +709,10 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
                 _ => throw new InvalidOperationException("Invalid ship size.")
             };
 
-            UpdateProbabilitiesForShip(matchState, ship);
+            UpdateProbabilitiesForShip(ship);
         }
 
-        _logger.LogTrace("Probability grid updated.");
+        Logger.LogTrace("Probability grid updated.");
 
         // Notify the probability grid has been updated
         if (OnProbabilityGridUpdated != null)
@@ -691,26 +730,25 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// Updates the probabilities for the given ship shape.
     /// Try to fit the ship in all possible positions allowed (vertical and horizontal) in all cells.
     /// </summary>
-    /// <param name="matchState">The current state of the match.</param>
     /// <param name="ship">The ship shape.</param>
-    private void UpdateProbabilitiesForShip(MatchState matchState, ShipShape ship)
+    protected void UpdateProbabilitiesForShip(ShipShape ship)
     {
-        for (var row = 0; row < matchState.Rows; row++)
-        for (var col = 0; col < matchState.Columns; col++)
-        {
-            var position = new GameCellPosition(row, col);
-
-            if (CanShipFit(position, ship, matchState))
+        for (var row = 0; row < MatchState.Rows; row++)
+            for (var col = 0; col < MatchState.Columns; col++)
             {
-                IncrementProbabilities(position, ship);
-            }
+                var position = new GameCellPosition(row, col);
 
-            var rotatedShip = ship.Rotate();
-            if (CanShipFit(position, rotatedShip, matchState))
-            {
-                IncrementProbabilities(position, rotatedShip);
+                if (CanShipFit(position, ship))
+                {
+                    IncrementProbabilities(position, ship);
+                }
+
+                var rotatedShip = ship.Rotate();
+                if (CanShipFit(position, rotatedShip))
+                {
+                    IncrementProbabilities(position, rotatedShip);
+                }
             }
-        }
     }
 
     /// <summary>
@@ -718,20 +756,20 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// </summary>
     /// <param name="startPosition">The starting position.</param>
     /// <param name="ship">The ship shape.</param>
-    private void IncrementProbabilities(GameCellPosition startPosition, ShipShape ship)
+    protected void IncrementProbabilities(GameCellPosition startPosition, ShipShape ship)
     {
         var rows = ship.Shape.GetLength(0);
         var cols = ship.Shape.GetLength(1);
 
         for (var r = 0; r < rows; r++)
-        for (var c = 0; c < cols; c++)
-        {
-            if (!ship.Shape[r, c])
-                continue;
+            for (var c = 0; c < cols; c++)
+            {
+                if (!ship.Shape[r, c])
+                    continue;
 
-            var position = new GameCellPosition(startPosition.Row + r, startPosition.Column + c);
-            _probabilitiesGrid.SetCellStatus(position, _probabilitiesGrid.GetCellStatus(position) + 1);
-        }
+                var position = new GameCellPosition(startPosition.Row + r, startPosition.Column + c);
+                _probabilitiesGrid.SetCellStatus(position, _probabilitiesGrid.GetCellStatus(position) + 1);
+            }
     }
 
     /// <summary>
@@ -740,29 +778,28 @@ public class ProbabilityMatchPlayingStrategy : MatchPlayingStrategyBase, IMatchP
     /// </summary>
     /// <param name="position">The starting position.</param>
     /// <param name="ship">The ship shape.</param>
-    /// <param name="matchState">The current state of the match.</param>
     /// <returns>True if the ship can fit, false otherwise.</returns>
-    private bool CanShipFit(GameCellPosition position, ShipShape ship, MatchState matchState)
+    protected bool CanShipFit(GameCellPosition position, ShipShape ship)
     {
         var rows = ship.Shape.GetLength(0);
         var cols = ship.Shape.GetLength(1);
 
         for (var r = 0; r < rows; r++)
-        for (var c = 0; c < cols; c++)
-        {
-            if (!ship.Shape[r, c])
-                continue;
+            for (var c = 0; c < cols; c++)
+            {
+                if (!ship.Shape[r, c])
+                    continue;
 
-            var checkRow = position.Row + r;
-            var checkCol = position.Column + c;
+                var checkRow = position.Row + r;
+                var checkCol = position.Column + c;
 
-            if (checkRow >= matchState.Rows || checkCol >= matchState.Columns)
-                return false;
+                if (checkRow >= MatchState.Rows || checkCol >= MatchState.Columns)
+                    return false;
 
-            var checkPosition = new GameCellPosition(checkRow, checkCol);
-            if (matchState.GameField.GetCellStatus(checkPosition) != CellState.Unknown)
-                return false;
-        }
+                var checkPosition = new GameCellPosition(checkRow, checkCol);
+                if (MatchState.GameField.GetCellStatus(checkPosition) != CellState.Unknown)
+                    return false;
+            }
 
         return true;
     }

@@ -1,5 +1,6 @@
 using battleships.lib;
 using battleships.lib.MatchPlayingStrategies.Models;
+
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -24,12 +25,12 @@ public static class UiRenderHelpers
             table.AddColumn(column.ToString(), c => c.RightAligned());
         }
 
-        for (var column = 0; column < columns; column++)
+        for (var row = 0; row < rows; row++)
         {
             var items = new List<IRenderable>();
-            items.Add(new Text(column.ToString()));
+            items.Add(new Text(row.ToString()));
 
-            for (var row = 0; row < rows; row++)
+            for (var column = 0; column < columns; column++)
             {
                 // give two digits string
                 var value = grid[row * columns + column];
@@ -64,12 +65,12 @@ public static class UiRenderHelpers
             grid.AddColumn();
         }
 
-        for (var column = 0; column < columns; column++)
+        for (var row = 0; row < rows; row++)
         {
             var items = new List<IRenderable>();
-            items.Add(new Markup(column.ToString()));
+            items.Add(new Markup(row.ToString()));
 
-            for (var row = 0; row < rows; row++)
+            for (var column = 0; column < columns; column++)
             {
                 var value = cells[row * columns + column];
 
@@ -104,20 +105,20 @@ public static class UiRenderHelpers
         var canvas = new Canvas(columns, rows);
 
         for (var column = 0; column < columns; column++)
-        for (var row = 0; row < rows; row++)
-        {
-            var value = cells[row * columns + column];
-
-            var color = value switch
+            for (var row = 0; row < rows; row++)
             {
-                CellState.Unknown => Color.LightSlateGrey,
-                CellState.Water => Color.Blue,
-                CellState.Ship => Color.Green,
-                _ => throw new ArgumentOutOfRangeException()
-            };
+                var value = cells[row * columns + column];
 
-            canvas.SetPixel(row, column, color);
-        }
+                var color = value switch
+                {
+                    CellState.Unknown => Color.LightSlateGrey,
+                    CellState.Water => Color.Blue,
+                    CellState.Ship => Color.Green,
+                    _ => throw new ArgumentOutOfRangeException()
+                };
+
+                canvas.SetPixel(column, row, color);
+            }
 
         return canvas;
     }
@@ -139,6 +140,10 @@ public static class UiRenderHelpers
         table.AddRow("Playing strategy", args.PlayingStrategy);
         table.AddRow("Map ID", args.MapId.ToString());
         table.AddRow("Match move count", args.MatchMoveCount.ToString());
+        table.AddRow("Total move count", args.TotalMoveCount.ToString());
+
+        var avg = args.MapId == 0 ? 0 : Math.Round((args.TotalMoveCount - args.MatchMoveCount) / (double)args.MapId, 0);
+        table.AddRow("Avg. moves per match", avg.ToString());
         table.AddRow("Status", matchStatus);
         //table.AddEmptyRow();
 

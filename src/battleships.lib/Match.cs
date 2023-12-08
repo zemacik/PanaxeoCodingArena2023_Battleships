@@ -17,6 +17,7 @@ public record MatchStateArgs
     public bool GameFinished { get; init; }
     public int MapCount { get; init; }
     public int MatchMoveCount { get; init; }
+    public int TotalMoveCount { get; init; }
     public string GameTarget { get; init; } = string.Empty;
     public string PlayingStrategy { get; init; } = string.Empty;
 }
