@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Newtonsoft.Json;
 
 namespace battleships.lib.GameTargets.Models;
 
@@ -54,5 +55,6 @@ public record FireResponse
     /// results in new game (or error if player has already achieved max number of tries).
     /// </summary>
     [JsonPropertyName("finished")]
+    [JsonProperty("finished")]
     public bool GameFinished { get; init; }
 }

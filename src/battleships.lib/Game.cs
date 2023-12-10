@@ -1,7 +1,7 @@
 ﻿using battleships.lib.GameTargets;
+using battleships.lib.GameTargets.Models;
 using battleships.lib.MatchPlayingStrategies;
 using battleships.lib.Models;
-
 using Microsoft.Extensions.Logging;
 
 namespace battleships.lib;
@@ -97,16 +97,16 @@ public class Game
         var matchState = await _gameTarget.GetFireStatusAsync(_isSimulation);
         _logger.LogTrace("State of game or last match: {@matchState}", matchState);
 
-        var isGameOver = matchState.GameFinished && matchState.MapId == matchState.MapCount;
+        var isGameOver = matchState.GameFinished && matchState.MapId == matchState.MapCount - 1;
 
-        // If the game is finished at the beginning, return the total move count.
-        // we don't need to play the matches. (But also we will not get the match results.)
-        // (API/GameTarget is not returning the match results if the game is finished.)
+        // If the game is finished at the beginning, start a new game.
         if (isGameOver)
         {
-            return new GameResult
+            matchState = new FireResponse
             {
-                TotalMoveCount = matchState.MoveCount
+                MapId = 0,
+                MapCount = matchState.MapCount,
+                Grid = new string(Constants.GridCellUnknown, Constants.GridRows * Constants.GridColumns),
             };
         }
 
