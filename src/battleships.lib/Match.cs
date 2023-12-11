@@ -231,7 +231,7 @@ internal class Match
 
             avengerFireResponse.AvengerResult.ForEach(cell =>
             {
-                _state.AvengerFireResult.Add(new GameCellPosition(cell.MapPoint.Y, cell.MapPoint.X), cell.Hit);
+                _state.AvengerFireResult.Add(new GameCellPosition(cell.MapPoint.X, cell.MapPoint.Y), cell.Hit);
             });
         }
 
